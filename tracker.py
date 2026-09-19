@@ -14,6 +14,11 @@ from sources.trip import search as trip_search
 
 load_dotenv()
 
+
+# ============================================================
+# SEARCH SETTINGS
+# ============================================================
+
 ORIGIN = "CXR"
 DESTINATION = "HKT"
 
@@ -21,32 +26,62 @@ START_DATE = date(2026, 12, 21)
 END_DATE = date(2026, 12, 31)
 
 PASSENGERS = 2
+
 MAX_STOPS = 2
 MAX_DURATION_MINUTES = 600
+
 MAX_PRICE_PER_PERSON = 110
+
 BAGGAGE_KG = 20
+
+
+# ============================================================
+# TELEGRAM
+# ============================================================
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+
+# ============================================================
+# FILES
+# ============================================================
 
 HISTORY_FILE = "data/history.json"
 SEEN_FILE = "data/seen.json"
 
 
+# ============================================================
+# JSON HELPERS
+# ============================================================
+
 def load_json(path, default):
     try:
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
+
     except (FileNotFoundError, json.JSONDecodeError):
         return default
 
 
 def save_json(path, data):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    directory = os.path.dirname(path)
+
+    if directory:
+        os.makedirs(directory, exist_ok=True)
 
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+        json.dump(
+            data,
+            f,
+            ensure_ascii=False,
+            indent=2,
+        )
 
+
+# ============================================================
+# DATE RANGE
+# ============================================================
 
 def date_range(start, end):
     current = start
@@ -56,79 +91,149 @@ def date_range(start, end):
         current += timedelta(days=1)
 
 
+# ============================================================
+# NORMALIZE OFFER
+# ============================================================
+
 def normalize_offer(offer, source):
     """
-    Expected offer structure:
-
-    {
-        "date": "2026-12-15",
-        "price": 89.50,
-        "currency": "USD",
-        "airline": "AirAsia",
-        "stops": 1,
-        "duration_minutes": 420,
-        "baggage": "INCLUDED",
-        "self_transfer": False,
-        "url": "https://..."
-    }
+    Convert source-specific offer into one standard structure.
     """
 
     if not isinstance(offer, dict):
         return None
 
     try:
-        price = float(offer.get("price", 0))
+        price = float(
+            offer.get("price", 0)
+        )
+
     except (TypeError, ValueError):
         return None
 
     try:
-        stops = int(offer.get("stops", 99))
+        stops = int(
+            offer.get("stops", 99)
+        )
+
     except (TypeError, ValueError):
         stops = 99
 
     try:
-        duration = int(offer.get("duration_minutes", 99999))
+        duration = int(
+            offer.get(
+                "duration_minutes",
+                99999,
+            )
+        )
+
     except (TypeError, ValueError):
         duration = 99999
 
+    baggage = offer.get(
+        "baggage",
+        "VERIFY",
+    )
+
+    if baggage not in (
+        "INCLUDED",
+        "EXTRA",
+        "VERIFY",
+    ):
+        baggage = "VERIFY"
+
     return {
         "source": source,
-        "date": str(offer.get("date", "")),
+
+        "date": str(
+            offer.get("date", "")
+        ),
+
         "price": price,
-        "currency": offer.get("currency", "USD"),
-        "airline": offer.get("airline", "Unknown"),
+
+        "currency": offer.get(
+            "currency",
+            "USD",
+        ),
+
+        "airline": offer.get(
+            "airline",
+            "Unknown",
+        ),
+
         "stops": stops,
+
         "duration_minutes": duration,
-        "baggage": offer.get("baggage", "VERIFY"),
-        "self_transfer": bool(offer.get("self_transfer", False)),
-        "url": offer.get("url", ""),
-        "route": offer.get("route", ""),
+
+        "baggage": baggage,
+
+        "self_transfer": bool(
+            offer.get(
+                "self_transfer",
+                False,
+            )
+        ),
+
+        "url": offer.get(
+            "url",
+            "",
+        ),
+
+        "route": offer.get(
+            "route",
+            f"{ORIGIN} → {DESTINATION}",
+        ),
     }
 
+
+# ============================================================
+# VALIDATE OFFER
+# ============================================================
 
 def is_valid_offer(offer):
     if not offer:
         return False
 
+    # Currency must be USD.
     if offer["currency"] != "USD":
         return False
 
+    # Price must be positive.
     if offer["price"] <= 0:
         return False
 
-    price_per_person = offer["price"] / PASSENGERS
+    # Google / sources return total price for all passengers.
+    price_per_person = (
+        offer["price"] / PASSENGERS
+    )
 
+    # Maximum $110 per person.
     if price_per_person > MAX_PRICE_PER_PERSON:
         return False
 
+    # Maximum 2 stops.
     if offer["stops"] > MAX_STOPS:
         return False
 
-    if offer["duration_minutes"] > MAX_DURATION_MINUTES:
+    # Maximum 10 hours.
+    if (
+        offer["duration_minutes"]
+        > MAX_DURATION_MINUTES
+    ):
+        return False
+
+    # IMPORTANT:
+    # Only accept flights where the source
+    # explicitly detected included baggage.
+    if offer["baggage"] != "INCLUDED":
         return False
 
     return True
 
+
+# ============================================================
+# OFFER KEY
+# ============================================================
 
 def offer_key(offer):
     raw = "|".join(
@@ -136,24 +241,39 @@ def offer_key(offer):
             offer["date"],
             offer["airline"],
             str(offer["stops"]),
-            str(offer["duration_minutes"]),
+            str(
+                offer["duration_minutes"]
+            ),
             f'{offer["price"]:.2f}',
-            str(offer["self_transfer"]),
+            offer["baggage"],
+            str(
+                offer["self_transfer"]
+            ),
         ]
     )
 
-    return hashlib.sha256(raw.encode()).hexdigest()
+    return hashlib.sha256(
+        raw.encode()
+    ).hexdigest()
 
+
+# ============================================================
+# DEAL LEVEL
+# ============================================================
 
 def deal_level(price_per_person):
     if price_per_person <= 80:
         return "🔥 SUPER DEAL"
 
-    if price_per_person <= 100:
+    if price_per_person <= 110:
         return "🎯 TARGET"
 
     return ""
 
+
+# ============================================================
+# DURATION
+# ============================================================
 
 def format_duration(minutes):
     hours = minutes // 60
@@ -165,57 +285,111 @@ def format_duration(minutes):
     return f"{hours}h"
 
 
+# ============================================================
+# FORMAT TELEGRAM OFFER
+# ============================================================
+
 def format_offer(offer):
     total_price = offer["price"]
-    price_per_person = total_price / PASSENGERS
 
-    level = deal_level(price_per_person)
+    price_per_person = (
+        total_price / PASSENGERS
+    )
+
+    level = deal_level(
+        price_per_person
+    )
 
     baggage = offer["baggage"]
 
-    if baggage not in ("INCLUDED", "EXTRA", "VERIFY"):
+    if baggage not in (
+        "INCLUDED",
+        "EXTRA",
+        "VERIFY",
+    ):
         baggage = "VERIFY"
 
-    transfer = "SELF-TRANSFER ⚠️" if offer["self_transfer"] else "Standard connection"
+    if offer["self_transfer"]:
+        transfer = (
+            "SELF-TRANSFER ⚠️"
+        )
+    else:
+        transfer = (
+            "Standard connection"
+        )
 
     lines = [
-        f"{level}",
+        level,
         "",
+
         f"📅 Date: {offer['date']}",
-        f"✈️ Airline: {offer['airline']}",
-        f"🛫 CXR → HKT",
-        f"🔄 Stops: {offer['stops']}",
-        f"⏱ Duration: {format_duration(offer['duration_minutes'])}",
+
+        f"✈️ Airline: "
+        f"{offer['airline']}",
+
+        "🛫 CXR → HKT",
+
+        f"🔄 Stops: "
+        f"{offer['stops']}",
+
+        f"⏱ Duration: "
+        f"{format_duration(offer['duration_minutes'])}",
+
         "",
-        f"💰 Total for 2: ${total_price:.2f}",
-        f"👤 Per person: ${price_per_person:.2f}",
-        f"🧳 20kg baggage: {baggage}",
-        f"🔀 Connection: {transfer}",
-        f"🔎 Source: {offer['source']}",
+
+        f"💰 Total for 2: "
+        f"${total_price:.2f}",
+
+        f"👤 Per person: "
+        f"${price_per_person:.2f}",
+
+        f"🧳 {BAGGAGE_KG}kg baggage: "
+        f"{baggage}",
+
+        f"🔀 Connection: "
+        f"{transfer}",
+
+        f"🔎 Source: "
+        f"{offer['source']}",
     ]
 
     if offer.get("route"):
-        lines.append(f"🗺 Route: {offer['route']}")
+        lines.append(
+            f"🗺 Route: "
+            f"{offer['route']}"
+        )
 
     if offer.get("url"):
         lines.extend(
             [
                 "",
-                f"🔗 Book/check: {offer['url']}",
+                f"🔗 Book/check: "
+                f"{offer['url']}",
             ]
         )
 
     return "\n".join(lines)
 
 
+# ============================================================
+# TELEGRAM
+# ============================================================
+
 def send_telegram(message):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram credentials are missing.")
+    if (
+        not TELEGRAM_BOT_TOKEN
+        or not TELEGRAM_CHAT_ID
+    ):
+        print(
+            "Telegram credentials are missing."
+        )
+
         return False
 
     url = (
-        f"https://api.telegram.org/bot"
-        f"{TELEGRAM_BOT_TOKEN}/sendMessage"
+        "https://api.telegram.org/bot"
+        f"{TELEGRAM_BOT_TOKEN}"
+        "/sendMessage"
     )
 
     payload = {
@@ -236,17 +410,33 @@ def send_telegram(message):
         data = response.json()
 
         if not data.get("ok"):
-            print("Telegram error:", data)
+            print(
+                "Telegram error:",
+                data,
+            )
+
             return False
 
         return True
 
     except requests.RequestException as exc:
-        print("Telegram request failed:", exc)
+        print(
+            "Telegram request failed:",
+            exc,
+        )
+
         return False
 
 
-def collect_source(source_name, search_function, travel_date):
+# ============================================================
+# SOURCE COLLECTION
+# ============================================================
+
+def collect_source(
+    source_name,
+    search_function,
+    travel_date,
+):
     print(
         f"[{source_name}] Searching "
         f"{ORIGIN} -> {DESTINATION} "
@@ -262,41 +452,87 @@ def collect_source(source_name, search_function, travel_date):
         )
 
         if not results:
+            print(
+                f"[{source_name}] "
+                "raw offers: 0"
+            )
+
             return []
+
+        print(
+            f"[{source_name}] "
+            f"raw offers: {len(results)}"
+        )
 
         normalized = []
 
         for result in results:
-            offer = normalize_offer(result, source_name)
 
-            if offer and is_valid_offer(offer):
-                normalized.append(offer)
+            offer = normalize_offer(
+                result,
+                source_name,
+            )
+
+            if not offer:
+                continue
+
+            if is_valid_offer(offer):
+                normalized.append(
+                    offer
+                )
 
         print(
             f"[{source_name}] "
-            f"valid offers: {len(normalized)}"
+            f"valid offers: "
+            f"{len(normalized)}"
         )
 
         return normalized
 
     except Exception as exc:
         print(
-            f"[{source_name}] ERROR: {type(exc).__name__}: {exc}"
+            f"[{source_name}] ERROR: "
+            f"{type(exc).__name__}: {exc}"
         )
+
         return []
 
 
+# ============================================================
+# SEARCH ALL SOURCES
+# ============================================================
+
 def search_all_sources(travel_date):
+
     offers = []
 
     sources = [
-        ("Google Flights", google_search),
-        ("Skyscanner", skyscanner_search),
-        ("Kiwi", kiwi_search),
-        ("Trip.com", trip_search),
+        (
+            "Google Flights",
+            google_search,
+        ),
+
+        (
+            "Skyscanner",
+            skyscanner_search,
+        ),
+
+        (
+            "Kiwi",
+            kiwi_search,
+        ),
+
+        (
+            "Trip.com",
+            trip_search,
+        ),
     ]
 
-    for source_name, search_function in sources:
+    for (
+        source_name,
+        search_function,
+    ) in sources:
+
         offers.extend(
             collect_source(
                 source_name,
@@ -308,11 +544,24 @@ def search_all_sources(travel_date):
     return offers
 
 
-def update_history(history, offers):
-    timestamp = datetime.utcnow().isoformat()
+# ============================================================
+# PRICE HISTORY
+# ============================================================
+
+def update_history(
+    history,
+    offers,
+):
+    timestamp = (
+        datetime.utcnow()
+        .isoformat()
+    )
 
     for offer in offers:
-        key = offer_key(offer)
+
+        key = offer_key(
+            offer
+        )
 
         if key not in history:
             history[key] = []
@@ -320,45 +569,67 @@ def update_history(history, offers):
         history[key].append(
             {
                 "timestamp": timestamp,
-                "price": offer["price"],
-                "source": offer["source"],
+                "price": offer[
+                    "price"
+                ],
+                "source": offer[
+                    "source"
+                ],
             }
         )
 
-        # Keep only the latest 50 observations.
-        history[key] = history[key][-50:]
+        # Keep latest 50 observations.
+        history[key] = (
+            history[key][-50:]
+        )
 
+
+# ============================================================
+# CROSS-SOURCE COMPARISON
+# ============================================================
 
 def build_comparison(offers):
     """
-    Group similar offers from different sources.
-    This is intentionally simple: date + airline + stops.
+    Group similar offers:
+    date + airline + stops.
     """
 
     groups = {}
 
     for offer in offers:
+
         key = (
             offer["date"],
             offer["airline"],
             offer["stops"],
         )
 
-        groups.setdefault(key, []).append(offer)
+        groups.setdefault(
+            key,
+            [],
+        ).append(offer)
 
     return groups
 
 
 def comparison_text(offers):
-    groups = build_comparison(offers)
+
+    groups = build_comparison(
+        offers
+    )
 
     blocks = []
 
     for key, group in groups.items():
+
         if len(group) < 2:
             continue
 
-        date_value, airline, stops = key
+        (
+            date_value,
+            airline,
+            stops,
+        ) = key
 
         lines = [
             "🔎 CROSS-SOURCE COMPARISON",
@@ -368,24 +639,101 @@ def comparison_text(offers):
             f"🔄 {stops} stop(s)",
         ]
 
-        for offer in sorted(group, key=lambda x: x["price"]):
-            lines.append(
-                f"• {offer['source']}: "
-                f"${offer['price']:.2f} total"
+        for offer in sorted(
+            group,
+            key=lambda x: x["price"],
+        ):
+
+            price_per_person = (
+                offer["price"]
+                / PASSENGERS
             )
 
-        blocks.append("\n".join(lines))
+            lines.append(
+                f"• {offer['source']}: "
+                f"${offer['price']:.2f} total "
+                f"(${price_per_person:.2f}/person)"
+            )
 
-    return "\n\n".join(blocks)
+        blocks.append(
+            "\n".join(lines)
+        )
 
+    return "\n\n".join(
+        blocks
+    )
+
+
+# ============================================================
+# MAIN
+# ============================================================
 
 def main():
-    print("=" * 60)
-    print("PHUKET FARE TRACKER")
+
     print("=" * 60)
 
-    history = load_json(HISTORY_FILE, {})
-    seen = load_json(SEEN_FILE, [])
+    print(
+        "PHUKET FARE TRACKER"
+    )
+
+    print("=" * 60)
+
+    print(
+        f"Route: "
+        f"{ORIGIN} → {DESTINATION}"
+    )
+
+    print(
+        f"Dates: "
+        f"{START_DATE} → {END_DATE}"
+    )
+
+    print(
+        f"Passengers: "
+        f"{PASSENGERS}"
+    )
+
+    print(
+        f"Max price: "
+        f"${MAX_PRICE_PER_PERSON}/person"
+    )
+
+    print(
+        f"Baggage: "
+        f"{BAGGAGE_KG}kg included"
+    )
+
+    print(
+        f"Max stops: "
+        f"{MAX_STOPS}"
+    )
+
+    print(
+        f"Max duration: "
+        f"{MAX_DURATION_MINUTES} minutes"
+    )
+
+    print("=" * 60)
+
+
+    # --------------------------------------------------------
+    # LOAD DATABASES
+    # --------------------------------------------------------
+
+    history = load_json(
+        HISTORY_FILE,
+        {},
+    )
+
+    seen = load_json(
+        SEEN_FILE,
+        [],
+    )
+
+
+    # --------------------------------------------------------
+    # SEARCH
+    # --------------------------------------------------------
 
     all_offers = []
 
@@ -393,43 +741,89 @@ def main():
         START_DATE,
         END_DATE,
     ):
+
         offers = search_all_sources(
             travel_date.isoformat()
         )
 
-        all_offers.extend(offers)
+        all_offers.extend(
+            offers
+        )
+
+
+    # --------------------------------------------------------
+    # NO OFFERS
+    # --------------------------------------------------------
 
     if not all_offers:
-        print("No qualifying offers found.")
+
+        print(
+            "No qualifying offers found."
+        )
+
         return
 
-    # Sort cheapest first.
+
+    # --------------------------------------------------------
+    # SORT
+    # --------------------------------------------------------
+
     all_offers.sort(
-        key=lambda offer: offer["price"]
+        key=lambda offer: (
+            offer["price"]
+            / PASSENGERS
+        )
     )
 
+
     print(
-        f"Found {len(all_offers)} qualifying offers."
+        f"Found "
+        f"{len(all_offers)} "
+        f"qualifying offers."
     )
+
+
+    # --------------------------------------------------------
+    # UPDATE HISTORY
+    # --------------------------------------------------------
 
     update_history(
         history,
         all_offers,
     )
 
+
+    # --------------------------------------------------------
+    # FIND NEW ALERTS
+    # --------------------------------------------------------
+
     alerts = []
 
     for offer in all_offers:
-        key = offer_key(offer)
+
+        key = offer_key(
+            offer
+        )
 
         if key in seen:
             continue
 
-        alerts.append(offer)
-        seen.append(key)
+        alerts.append(
+            offer
+        )
 
-    # Keep seen database reasonably small.
+        seen.append(
+            key
+        )
+
+
+    # Keep database reasonably small.
     seen = seen[-2000:]
+
+
+    # --------------------------------------------------------
+    # SAVE DATABASES
+    # --------------------------------------------------------
 
     save_json(
         HISTORY_FILE,
@@ -441,43 +835,97 @@ def main():
         seen,
     )
 
+
+    # --------------------------------------------------------
+    # NO NEW DEALS
+    # --------------------------------------------------------
+
     if not alerts:
-        print("No new deals.")
+
+        print(
+            "No new deals."
+        )
+
         return
 
-    # Only send the cheapest 10 new offers
-    # during one run to avoid Telegram spam.
+
+    # --------------------------------------------------------
+    # MAX 10 ALERTS
+    # --------------------------------------------------------
+
     alerts = alerts[:10]
+
+
+    # --------------------------------------------------------
+    # TELEGRAM HEADER
+    # --------------------------------------------------------
 
     header = (
         "✈️ PHUKET FARE ALERT\n"
         "CXR → HKT\n"
-        "12–18 DEC 2026\n"
+        "21–31 DEC 2026\n"
         f"{PASSENGERS} passengers\n"
-        f"Max 2 stops / max 10h\n"
+        f"≤ ${MAX_PRICE_PER_PERSON}/person "
+        f"+ {BAGGAGE_KG}kg baggage\n"
+        f"Max {MAX_STOPS} stops / "
+        f"max 10h\n"
         "────────────────────"
     )
 
+
+    # --------------------------------------------------------
+    # SEND DEALS
+    # --------------------------------------------------------
+
+    sent_count = 0
+
     for offer in alerts:
+
         message = (
             header
             + "\n\n"
-            + format_offer(offer)
+            + format_offer(
+                offer
+            )
         )
 
-        send_telegram(message)
+        if send_telegram(
+            message
+        ):
+            sent_count += 1
 
-    comparison = comparison_text(
-        all_offers
+
+    # --------------------------------------------------------
+    # CROSS-SOURCE COMPARISON
+    # --------------------------------------------------------
+
+    comparison = (
+        comparison_text(
+            all_offers
+        )
     )
 
     if comparison:
-        send_telegram(comparison)
+
+        send_telegram(
+            comparison
+        )
+
+
+    # --------------------------------------------------------
+    # DONE
+    # --------------------------------------------------------
 
     print(
-        f"Sent {len(alerts)} new alert(s)."
+        f"Sent "
+        f"{sent_count} "
+        f"new alert(s)."
     )
 
+
+# ============================================================
+# ENTRY POINT
+# ============================================================
 
 if __name__ == "__main__":
     main()
