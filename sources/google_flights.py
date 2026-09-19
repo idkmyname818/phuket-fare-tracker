@@ -7,12 +7,13 @@ def search(origin, destination, travel_date, passengers=2):
     date_value = str(travel_date)
 
     url = (
-        "https://www.google.com/travel/flights"
-        f"?q=Flights%20from%20{quote(origin)}"
-        f"%20to%20{quote(destination)}"
-        f"%20on%20{date_value}"
-    )
-
+    "https://www.google.com/travel/flights"
+    f"?q=One-way%20flights%20from%20{quote(origin)}"
+    f"%20to%20{quote(destination)}"
+    f"%20on%20{date_value}"
+    f"%20for%20{passengers}%20adults"
+    "&curr=USD"
+)
     results = []
 
     with sync_playwright() as p:
