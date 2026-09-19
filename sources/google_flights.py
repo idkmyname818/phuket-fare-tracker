@@ -1,16 +1,9 @@
 from playwright.sync_api import sync_playwright
 from urllib.parse import quote
 import re
-import time
 
 
 def search(origin, destination, travel_date, passengers=2):
-    """
-    Best-effort Google Flights scraper.
-
-    Returns a list of dictionaries compatible with tracker.py.
-    """
-
     date_value = str(travel_date)
 
     url = (
@@ -23,34 +16,63 @@ def search(origin, destination, travel_date, passengers=2):
     results = []
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(
-            headless=True
-        )
+        browser = p.chromium.launch(headless=True)
 
         page = browser.new_page(
-            viewport={
-                "width": 1440,
-                "height": 1000,
-            },
+            viewport={"width": 1440, "height": 1200},
             locale="en-US",
+            user_agent=(
+                "Mozilla/5.0 (X11; Linux x86_64) "
+                "AppleWebKit/537.36 "
+                "(KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36"
+            ),
         )
 
         try:
+            print(f"[Google Flights] URL: {url}")
+
             page.goto(
                 url,
                 wait_until="domcontentloaded",
                 timeout=60000,
             )
 
-            page.wait_for_timeout(5000)
+            page.wait_for_timeout(8000)
 
-            # Scroll a little so flight cards load.
-            page.mouse.wheel(0, 2500)
-            page.wait_for_timeout(2000)
+            print(
+                "[Google Flights] TITLE:",
+                page.title(),
+            )
 
-            body_text = page.locator(
-                "body"
-            ).inner_text()
+            print(
+                "[Google Flights] FINAL URL:",
+                page.url,
+            )
+
+            # Scroll several times to trigger lazy loading.
+            for _ in range(4):
+                page.mouse.wheel(0, 2500)
+                page.wait_for_timeout(1500)
+
+            body_text = page.locator("body").inner_text()
+
+            print(
+                "[Google Flights] BODY LENGTH:",
+                len(body_text),
+            )
+
+            # Print first part of page so we can see
+            # what Google actually returns to GitHub.
+            print(
+                "========== GOOGLE PAGE PREVIEW =========="
+            )
+
+            print(body_text[:12000])
+
+            print(
+                "========== END GOOGLE PAGE PREVIEW =========="
+            )
 
             lines = [
                 line.strip()
@@ -59,28 +81,39 @@ def search(origin, destination, travel_date, passengers=2):
             ]
 
             for i, line in enumerate(lines):
+
                 price_match = re.search(
-                    r"\$\s?([\d,]+(?:\.\d{1,2})?)",
+                    r"([$€£])\s?([\d,]+(?:\.\d{1,2})?)",
                     line,
                 )
 
                 if not price_match:
                     continue
 
+                symbol = price_match.group(1)
+
                 price = float(
-                    price_match.group(1)
-                    .replace(",", "")
+                    price_match.group(2).replace(",", "")
                 )
 
-                # Look around the price for useful information.
+                currency_map = {
+                    "$": "USD",
+                    "€": "EUR",
+                    "£": "GBP",
+                }
+
+                currency = currency_map.get(
+                    symbol,
+                    "USD",
+                )
+
                 context = " ".join(
                     lines[
-                        max(0, i - 8):
-                        min(len(lines), i + 12)
+                        max(0, i - 10):
+                        min(len(lines), i + 15)
                     ]
                 )
 
-                # Stops.
                 stops = 0
 
                 stop_match = re.search(
@@ -93,6 +126,7 @@ def search(origin, destination, travel_date, passengers=2):
                     stops = int(
                         stop_match.group(1)
                     )
+
                 elif re.search(
                     r"nonstop|direct",
                     context,
@@ -100,11 +134,11 @@ def search(origin, destination, travel_date, passengers=2):
                 ):
                     stops = 0
 
-                # Duration.
                 duration_minutes = 9999
 
                 duration_match = re.search(
-                    r"(\d+)\s*hr\s*(\d+)?\s*min",
+                    r"(\d+)\s*(?:hr|h)\s*"
+                    r"(\d+)?\s*(?:min|m)?",
                     context,
                     re.IGNORECASE,
                 )
@@ -120,36 +154,12 @@ def search(origin, destination, travel_date, passengers=2):
                     )
 
                     duration_minutes = (
-                        hours * 60
-                        + minutes
+                        hours * 60 + minutes
                     )
 
-                else:
-                    short_duration = re.search(
-                        r"(\d+)h\s*(\d+)?m?",
-                        context,
-                        re.IGNORECASE,
-                    )
-
-                    if short_duration:
-                        hours = int(
-                            short_duration.group(1)
-                        )
-
-                        minutes = int(
-                            short_duration.group(2)
-                            or 0
-                        )
-
-                        duration_minutes = (
-                            hours * 60
-                            + minutes
-                        )
-
-                # Airline.
                 airline = "Unknown"
 
-                airline_patterns = [
+                airlines = [
                     "AirAsia",
                     "Thai AirAsia",
                     "VietJet Air",
@@ -168,16 +178,15 @@ def search(origin, destination, travel_date, passengers=2):
                     "Spring Airlines",
                 ]
 
-                for name in airline_patterns:
+                for name in airlines:
                     if name.lower() in context.lower():
                         airline = name
                         break
 
-                # Baggage is intentionally conservative.
                 baggage = "VERIFY"
 
                 if re.search(
-                    r"20\s*kg.*bag|bag.*20\s*kg|20kg",
+                    r"20\s*kg|20kg",
                     context,
                     re.IGNORECASE,
                 ):
@@ -195,7 +204,7 @@ def search(origin, destination, travel_date, passengers=2):
                     {
                         "date": date_value,
                         "price": price,
-                        "currency": "USD",
+                        "currency": currency,
                         "airline": airline,
                         "stops": stops,
                         "duration_minutes": duration_minutes,
@@ -210,14 +219,13 @@ def search(origin, destination, travel_date, passengers=2):
 
         except Exception as exc:
             print(
-                "Google Flights scraper error:",
-                exc,
+                "[Google Flights] ERROR:",
+                repr(exc),
             )
 
         finally:
             browser.close()
 
-    # Remove obvious duplicates.
     unique = []
     seen = set()
 
@@ -225,6 +233,7 @@ def search(origin, destination, travel_date, passengers=2):
         key = (
             result["date"],
             result["price"],
+            result["currency"],
             result["airline"],
             result["stops"],
             result["duration_minutes"],
@@ -235,5 +244,10 @@ def search(origin, destination, travel_date, passengers=2):
 
         seen.add(key)
         unique.append(result)
+
+    print(
+        "[Google Flights] parsed offers:",
+        len(unique),
+    )
 
     return unique
